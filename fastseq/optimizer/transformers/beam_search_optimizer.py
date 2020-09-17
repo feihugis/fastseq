@@ -20,20 +20,21 @@ from transformers.modeling_t5 import T5ForConditionalGeneration
 
 logger = get_logger(__name__)
 
-def adjust_num_beams(num_beams, ratio):
-    return int(num_beams * ratio)
 
-def get_cuda_allocated_mem(device=0):
+def adjust_num_beams(num_beams, ratio):
+    return min(int(num_beams * ratio), num_beams - 1)
+
+def get_cuda_alloc_mem(device=0):
     return int(torch.cuda.memory_allocated(device) / 1024 ** 2)
 
 def empty_cuda_cache(des=None):
-    m0 = get_cuda_allocated_mem()
+    m0 = get_cuda_alloc_mem()
     torch.cuda.empty_cache()
-    m1 = get_cuda_allocated_mem()
-    if des is None:
-        des = 'cuda.empty_cache():'
-    logger.debug('{} : {} -> {} = {} mb'.format(
-        des, m0, m1, m0 - m1))
+    m1 = get_cuda_alloc_mem()
+    # if des is None:
+    #     des = 'cuda.empty_cache():'
+    # logger.debug('{} : {} -> {} = {} mb'.format(
+    #     des, m0, m1, m0 - m1))
 
 @replace(calc_banned_ngram_tokens)
 def calc_banned_ngram_tokens_v2(prev_input_ids: Tensor,
@@ -1568,9 +1569,24 @@ class GenerationMixinV2(GenerationMixin):
         # done sentences
         done = [False for _ in range(batch_size)]
 
+        is_cuda_oom = False
+
+        def adjust_beam_shape_(t, cur_num_beam, new_num_beam):
+                    if t is None:
+                        return t
+                    cur_shape = t.shape
+                    view_shape = (
+                        cur_shape[0]//cur_num_beam, cur_num_beam,
+                        ) + cur_shape[1:]
+                    return t.view(view_shape)[:, :new_num_beam,].reshape(
+                        (-1,) + view_shape[2:]).detach().clone()
+
         while cur_len < max_length:
             logger.debug("Start generation: cur_len={}, num_beams={}, "
-            "cuda_alloc_mem={}".format(cur_len, num_beams, get_cuda_allocated_mem()))
+            "cuda_alloc_mem={}".format(
+                cur_len, num_beams, get_cuda_alloc_mem()))
+
+            is_cuda_oom = False
             model_inputs = self.prepare_inputs_for_generation(
                     input_ids,
                     past=past,
@@ -1579,80 +1595,71 @@ class GenerationMixinV2(GenerationMixin):
                     **model_specific_kwargs)
             # (batch_size * num_beams, cur_len, vocab_size)
             try:
-                m0 = get_cuda_allocated_mem()
-                # outputs: tuple([batch_size*num_beam, 1, vocab_size])
+                m0 = get_cuda_alloc_mem()
                 outputs = self(**model_inputs)
-                torch.cuda.empty_cache()
-                m1 = get_cuda_allocated_mem()
-                logger.debug(
-                    "decoder increase cuda mem from {} to {}: {} mb".format(
-                        m0, m1, m1 - m0))
+                empty_cuda_cache('Empty cache after decoding')
+                m1 = get_cuda_alloc_mem()
+                logger.debug("Decoder increase cuda alloc mem from {} to {}: {}"
+                " mb".format(m0, m1, m1 - m0))
             except RuntimeError as e:
-                logger.debug("Error triggered: {}".format(e))
+                logger.debug("Decoder OOM: {}".format(e))
+                is_cuda_oom = True
+
+            if is_cuda_oom:
                 del model_inputs
-                # empty_cuda_cache('Del model_inputs')
-                num_beams_1 = num_beams
-                num_beams_2 = num_beams
-                num_beams_3 = num_beams
-                cache_layer_num_beams = [[num_beams for _ in range(3)] for _ in range(12)]
-                adjusted_num_beams = num_beams
+                empty_cuda_cache('Del model_inputs')
+
+                adj_num_beams = num_beams
+                input_ids_num_beams = num_beams
+                encoder_last_layer_output_num_beams = num_beams
+                attention_mask_num_beams = num_beams
+                beam_scores_num_beams = num_beams
+                past_cache_num_beams = [
+                    [num_beams for _ in range(3)] for _ in range(12)]
+
                 while True:
-                    pre_adjusted_num_beams = adjusted_num_beams
-                    adjusted_num_beams = adjust_num_beams(pre_adjusted_num_beams, ratio=0.9)
-                    logger.debug("num_beams={} is too large, adjust it to {}".format(
-                        pre_adjusted_num_beams, adjusted_num_beams))
+                    pre_adj_num_beams = adj_num_beams
+                    adj_num_beams = adjust_num_beams(
+                        pre_adj_num_beams, ratio=0.95)
+                    logger.debug("Note: num_beams={} is too large, adjust it to"
+                    " {}; cuda_alloc_mem={}".format(
+                        pre_adj_num_beams, adj_num_beams, get_cuda_alloc_mem()))
                     try:
-                        if adjusted_num_beams == 0:
-                            logger.critical("Could not find a good num_beams")
+                        if adj_num_beams == 0:
+                            logger.error("Could not find a good num_beams")
                             sys.exit(1)
 
                         # update cache in past
                         if past[1] is not None:
                             decoder_cache = past[1]
-
-                            for block_id in range(len(decoder_cache)):
-                                prev_key = decoder_cache[block_id]['self']['prev_key']
-                                prev_key_padding_mask = decoder_cache[block_id]['self']['prev_key_padding_mask']
-                                prev_value = decoder_cache[block_id]['self']['prev_value']
-
-                                if prev_key is not None:
-                                    prev_key_shape = prev_key.shape
-                                    updated_prev_key_shape = (prev_key_shape[0]//cache_layer_num_beams[block_id][0], cache_layer_num_beams[block_id][0],) + prev_key_shape[1:]
-                                    past[1][block_id]['self']['prev_key'] = prev_key.view(updated_prev_key_shape)[:, :adjusted_num_beams, :, :, :].reshape((-1,) + updated_prev_key_shape[2:]).detach().clone()
-                                    cache_layer_num_beams[block_id][0] = adjusted_num_beams
-
-                                if prev_key_padding_mask is not None:
-                                    prev_key_padding_mask_shape = prev_key_padding_mask.shape
-                                    updated_prev_key_padding_mask_shape = (prev_key_padding_mask_shape[0]//cache_layer_num_beams[block_id][1], cache_layer_num_beams[block_id][1],) + prev_key_padding_mask_shape[1:]
-                                    past[1][block_id]['self']['prev_key_padding_mask'] = prev_key_padding_mask.view(updated_prev_key_padding_mask_shape)[:, :adjusted_num_beams, :, :, :].reshape((-1,) + updated_prev_key_padding_mask_shape[2:]).detach().clone()
-                                    cache_layer_num_beams[block_id][1] = adjusted_num_beams
-
-                                if prev_value is not None:
-                                    prev_value_shape =prev_value.shape
-                                    updated_prev_value_shape = (prev_value_shape[0]//cache_layer_num_beams[block_id][2], cache_layer_num_beams[block_id][2],) + prev_value_shape[1:]
-                                    past[1][block_id]['self']['prev_value'] = prev_value.view(updated_prev_value_shape)[:, :adjusted_num_beams, :, :, :].reshape((-1,) + updated_prev_value_shape[2:]).detach().clone()
-                                    cache_layer_num_beams[block_id][2] = adjusted_num_beams
-
-                        # empty_cuda_cache("Update cache in past")
+                            for block_id, _ in enumerate(decoder_cache):
+                                for i, k in enumerate(
+                                    ['prev_key',
+                                     'prev_key_padding_mask',
+                                     'prev_value']):
+                                    decoder_cache[block_id]['self'][k] = \
+                                        adjust_beam_shape_(
+                                            decoder_cache[block_id]['self'][k],
+                                            past_cache_num_beams[block_id][i],
+                                            adj_num_beams)
+                                    past_cache_num_beams[
+                                        block_id][i] = adj_num_beams
 
                         # update decoder_input_ids
-                        # [batch_size * num_beams, cur_len] ->
-                        # [batch_size * (num_beams//2), cur_len]
-                        input_ids = input_ids.view(
-                            batch_size, num_beams_1, -1)[
-                                :, 0:adjusted_num_beams, :].reshape(-1, cur_len).detach().clone()
-                        num_beams_1 = adjusted_num_beams
+                        # [batch_size*num_beams, cur_len] ->
+                        # [batch_size*adjusted_num_beams, cur_len]
+                        input_ids = adjust_beam_shape_(
+                            input_ids, input_ids_num_beams, adj_num_beams)
+                        input_ids_num_beams = adj_num_beams
 
                         # update encoder_outputs:
-                        # [batch_size * num_beams, max_seq_len, embed_dim] ->
-                        # [batch_size * (num_beams//2), max_seq_len, embed_dim]
-                        encoder_last_layer_output = encoder_outputs[0]
-                        _, max_seq_len, embed_dim = encoder_last_layer_output.shape
-                        encoder_last_layer_output = encoder_last_layer_output.view(
-                            batch_size, num_beams_2, max_seq_len, embed_dim)[
-                                :, :adjusted_num_beams, :, :].reshape(
-                                    -1, max_seq_len, embed_dim).detach().clone()
-                        num_beams_2 = adjusted_num_beams
+                        # [batch_size*num_beams, max_seq_len, embed_dim] ->
+                        # [batch_size*adjusted_num_beams, max_seq_len, embed_dim]
+                        encoder_last_layer_output = adjust_beam_shape_(
+                            encoder_outputs[0],
+                            encoder_last_layer_output_num_beams,
+                            adj_num_beams)
+                        encoder_last_layer_output_num_beams = adj_num_beams
                         encoder_outputs = (
                             encoder_last_layer_output,) + encoder_outputs[1:]
 
@@ -1660,15 +1667,16 @@ class GenerationMixinV2(GenerationMixin):
                         del encoder_last_layer_output
 
                         # update attention_mask
-                        attention_mask = attention_mask.view(
-                            batch_size, num_beams_3, max_seq_len)[
-                                :, :adjusted_num_beams, :].reshape(
-                                    -1, max_seq_len).detach().clone()
-                        num_beams_3 = adjusted_num_beams
+                        attention_mask = adjust_beam_shape_(
+                            attention_mask,
+                            attention_mask_num_beams,
+                            adj_num_beams)
+                        attention_mask_num_beams = adj_num_beams
 
                         # update beam_scores
-                        beam_scores = beam_scores.view(batch_size, num_beams)[
-                            :, :adjusted_num_beams].reshape(-1).detach().clone()
+                        beam_scores = adjust_beam_shape_(
+                            beam_scores, beam_scores_num_beams, adj_num_beams)
+                        beam_scores_num_beams = adj_num_beams
 
 
                         # logger.debug(torch.cuda.memory_summary(0))
@@ -1676,16 +1684,18 @@ class GenerationMixinV2(GenerationMixin):
                         break
                     except RuntimeError as e:
                         logger.debug("While adjusting num_beams={}, {}".format(
-                            adjusted_num_beams, e))
+                            adj_num_beams, e))
                         # empty_cuda_cache('Re-search num_beams')
 
-                self._update_beam_size(adjusted_num_beams)
+                self._update_beam_size(adj_num_beams)
 
-                # empty_cuda_cache('Finish changing num_beams')
+                empty_cuda_cache('Finish changing num_beams')
 
-                logger.debug("Finish the adjusting of num_beams: {} -> {}".format(
-                    num_beams, adjusted_num_beams))
-                num_beams = adjusted_num_beams
+                num_beams = adj_num_beams
+
+                logger.debug("Finish adjusting num_beams: {} -> {}; "
+                "cuda_alloc_mem={}".format(
+                    num_beams, adj_num_beams, get_cuda_alloc_mem()))
 
                 continue
 

@@ -94,11 +94,11 @@ class TransformersBeamSearchOptimizerTest(TestCaseBase):
 
     @parameterized.named_parameters({
         'testcase_name': 'FP32',
-        'batch_size': 17,
-        'max_token_length': 1011,
-        'num_beams': 61,
+        'batch_size': 16,
+        'max_token_length': 1024,
+        'num_beams': 100,
         'min_gen_length': 55,
-        'max_gen_length': 110,
+        'max_gen_length': 199,
         'no_repeat_ngram_size': 3,
         'early_stopping': True,
     })
@@ -167,8 +167,8 @@ class TransformersBeamSearchOptimizerTest(TestCaseBase):
 
             for i, output in enumerate(outputs):
                 if output != self.expected_outputs[i]:
-                    logger.debug(
-                        "- {} \n + {} \n".format(output,self.expected_outputs[i]))
+                    logger.debug("\n- {} \n+ {} \n".format(
+                        output,self.expected_outputs[i]))
 
 
 if __name__ == "__main__":
