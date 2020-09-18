@@ -97,7 +97,7 @@ class GenerationMixinV2(GenerationMixin):
                 layer.encoder_attn.num_beams = num_beams
                 layer.self_attn.num_beams = num_beams
             logger.debug(
-                "num_beams has been updated to {}".format(num_beams))
+                "DecoderLayer: num_beams has been updated to {}".format(num_beams))
             return
 
         # Update num_beams for T5 decoder attention layer
@@ -106,7 +106,7 @@ class GenerationMixinV2(GenerationMixin):
                 block.layer[0].SelfAttention.num_beams = num_beams
                 block.layer[1].EncDecAttention.num_beams = num_beams
             logger.debug(
-                "num_beams has been updated to {}".format(num_beams))
+                "DecoderLayer: num_beams has been updated to {}".format(num_beams))
             return
 
         logger.debug(
@@ -1572,17 +1572,17 @@ class GenerationMixinV2(GenerationMixin):
         is_cuda_oom = False
 
         def adjust_beam_shape_(t, cur_num_beam, new_num_beam):
-                    if t is None:
-                        return t
-                    cur_shape = t.shape
-                    view_shape = (
-                        cur_shape[0]//cur_num_beam, cur_num_beam,
-                        ) + cur_shape[1:]
-                    return t.view(view_shape)[:, :new_num_beam,].reshape(
-                        (-1,) + view_shape[2:]).detach().clone()
+            if t is None:
+                return t
+            cur_shape = t.shape
+            view_shape = (
+                cur_shape[0]//cur_num_beam, cur_num_beam,
+                ) + cur_shape[1:]
+            return t.view(view_shape)[:, :new_num_beam,].reshape(
+                (-1,) + view_shape[2:]).detach().clone()
 
         while cur_len < max_length:
-            logger.debug("Start generation: cur_len={}, num_beams={}, "
+            logger.debug("Start gen: cur_len={}, num_beams={}, "
             "cuda_alloc_mem={}".format(
                 cur_len, num_beams, get_cuda_alloc_mem()))
 
@@ -1599,7 +1599,7 @@ class GenerationMixinV2(GenerationMixin):
                 outputs = self(**model_inputs)
                 empty_cuda_cache('Empty cache after decoding')
                 m1 = get_cuda_alloc_mem()
-                logger.debug("Decoder increase cuda alloc mem from {} to {}: {}"
+                logger.debug("\tDecoder increase cuda alloc mem from {} to {}: {}"
                 " mb".format(m0, m1, m1 - m0))
             except RuntimeError as e:
                 logger.debug("Decoder OOM: {}".format(e))
@@ -1691,11 +1691,10 @@ class GenerationMixinV2(GenerationMixin):
 
                 empty_cuda_cache('Finish changing num_beams')
 
-                num_beams = adj_num_beams
-
                 logger.debug("Finish adjusting num_beams: {} -> {}; "
                 "cuda_alloc_mem={}".format(
                     num_beams, adj_num_beams, get_cuda_alloc_mem()))
+                num_beams = adj_num_beams
 
                 continue
 
@@ -1988,8 +1987,8 @@ class SelfAttentionV2(SelfAttention):
         if self.encoder_decoder_attention and ("prev_key" not in saved_state):
             cache_shape = (
                 cache_bsz, self.num_beams, self.num_heads, -1, self.head_dim)
-            k = k.view(cache_shape)[:, 0 : 1, :, :, :].contiguous()
-            v = v.view(cache_shape)[:, 0 : 1, :, :, :].contiguous()
+            k = k.view(cache_shape)[:, 0 : 1, :, :, :].contiguous().detach().clone()
+            v = v.view(cache_shape)[:, 0 : 1, :, :, :].contiguous().detach().clone()
             layer_state[self.cache_key] = {
                 "prev_key": k,
                 "prev_value": v,
