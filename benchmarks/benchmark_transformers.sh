@@ -25,10 +25,11 @@ elif [[ "$framework" == "transformers+fastseq" ]]; then
     ver2=`pip show fastseq | awk  '{if($1=="Version:")print $2}'`
     framework_versioned="transformers_v$ver1+fastseq_v$ver2"
 fi
+
 IFS='/' read -ra bs_list <<< "$bss"
 for i in `seq $LOOP`; do
 for bs in "${bs_list[@]}"; do
-    echo "Processing Loop=$i/$LOOP Util=$framework_versioned Model=$model Task=$task Split=$split BS=$bs"
+    echo "Processing Loop=$i/$LOOP Util=$framework_versioned Model=$model Task=$task Split=$split BS=$bs $*"
     rm -rf $SUMMARY_FILE $SCORE_FILE
     start=`date +%s`
     fastseq-generate-for-transformers $model $data_dir/$split.source $SUMMARY_FILE --reference_path $data_dir/$split.target --device cuda --bs $bs --fp16 --score_path $SCORE_FILE $extra_param $* > $STDOUT_FILE 2> $STDERR_FILE
@@ -52,9 +53,9 @@ for bs in "${bs_list[@]}"; do
             rouge2=`sed 's/.*"rouge2": \([.0-9]*\).*/\1/' $SCORE_FILE | awk '{printf "%.2f",$1}'`
             rougel=`sed 's/.*"rougeL": \([.0-9]*\).*/\1/' $SCORE_FILE | awk '{printf "%.2f",$1}'`
         fi
-        echo "$framework_versioned $model $task $split $bs $samples $tokens $bleu $rouge1|$rouge2|$rougel NA NA $runtime $throughput1 $throughput2" >> $perff
+        echo "$framework_versioned $model $task $split $bs $samples $tokens $bleu $rouge1|$rouge2|$rougel NA NA $runtime $throughput1 $throughput2 ($*)" >> $perff
     else
-        echo "$framework_versioned $model $task $split $bs NA NA NA NA NA NA $runtime NA NA" >> $perff
+        echo "$framework_versioned $model $task $split $bs NA NA NA NA NA NA $runtime NA NA ($*)" >> $perff
         cat $STDERR_FILE
         echo "Return code: " $ret
         exit -1 # force to fail

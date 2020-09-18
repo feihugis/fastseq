@@ -53,7 +53,7 @@ mark1=" with beam="
 mark2="| Evaluated "
 for i in `seq $LOOP`; do
 for bs in "${bs_list[@]}"; do
-    echo "Processing Loop=$i/$LOOP Util=$framework_versioned Model=$model Task=$task Split=$split BS=$bs"
+    echo "Processing Loop=$i/$LOOP Util=$framework_versioned Model=$model Task=$task Split=$split BS=$bs $*"
     start=`date +%s`
     if [[ $type == lm ]]; then
         $util $data_dir \
@@ -107,16 +107,16 @@ for bs in "${bs_list[@]}"; do
         bleu=`echo $tail | sed 's/.*BLEU4 = [.0-9]*, \([./0-9]*\) .*/\1/'`
         throughput1=`awk -va=$samples -vb=$runtime 'BEGIN{printf "%.1f",a/b}'`
         throughput2=`awk -va=$tokens -vb=$runtime 'BEGIN{printf "%.1f",a/b}'`
-        echo "$framework_versioned $model $task $split $bs $samples $tokens $bleu4 NA NA NA $runtime $throughput1 $throughput2" >> $perff
+        echo "$framework_versioned $model $task $split $bs $samples $tokens $bleu4 NA NA NA $runtime $throughput1 $throughput2 ($*)" >> $perff
     elif [[ $ret -eq 0 &&  $tail == *$mark2* ]]; then
         samples=NA
         tokens=`echo $tail | sed 's/.*Evaluated \([0-9]*\) tokens.*/\1/'`
         loss=`echo $tail | sed 's/.*Loss.*: \([.0-9]*\),.*/\1/' | awk '{printf "%.2f",$1}'`
         perplexity=`echo $tail | sed 's/.*Perplexity.*: \([.0-9]*\).*/\1/' | awk '{printf "%.2f",$1}'`
         throughput2=`awk -va=$tokens -vb=$runtime 'BEGIN{printf "%.1f",a/b}'`
-        echo "$framework_versioned $model $task $split $bs $samples $tokens NA NA $loss $perplexity $runtime NA $throughput2" >> $perff
+        echo "$framework_versioned $model $task $split $bs $samples $tokens NA NA $loss $perplexity $runtime NA $throughput2 ($*)" >> $perff
     else
-        echo "$framework_versioned $model $task $split $bs NA NA NA NA NA NA $runtime NA NA" >> $perff
+        echo "$framework_versioned $model $task $split $bs NA NA NA NA NA NA $runtime NA NA ($*)" >> $perff
         cat $STDERR_FILE
         echo "Return code: " $ret
         exit -1 # force to fail

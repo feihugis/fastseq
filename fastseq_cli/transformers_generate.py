@@ -29,6 +29,7 @@ def generate_summaries_or_translations(
     decoder_start_token_id=None,
     fastseq_opt=True,
     no_repeat_ngram_size=None,
+    num_beams=None,
     **gen_kwargs,
 ) -> None:
     """Run generation"""
@@ -61,6 +62,7 @@ def generate_summaries_or_translations(
             attention_mask=attention_mask,
             decoder_start_token_id=decoder_start_token_id,
             no_repeat_ngram_size=no_repeat_ngram_size,
+            num_beams=num_beams,
             **gen_kwargs,
         )
         dec = tokenizer.batch_decode(summaries,
@@ -118,6 +120,8 @@ def run_generate():
     parser.add_argument("--without_fastseq_opt", action="store_true")
     parser.add_argument("--no_repeat_ngram_size", type=int, default=None,
                          required=False, help="size of no repeat ngram")
+    parser.add_argument("--num_beams", type=int, default=None,
+                         required=False, help="beam size")
     args = parser.parse_args()
     examples = [
         " " + x.rstrip() if "t5" in args.model_name else x.rstrip()
@@ -137,6 +141,7 @@ def run_generate():
         decoder_start_token_id=args.decoder_start_token_id,
         fastseq_opt=not args.without_fastseq_opt,
         no_repeat_ngram_size=args.no_repeat_ngram_size,
+        num_beams=args.num_beams,
     )
     if args.reference_path is None:
         return
