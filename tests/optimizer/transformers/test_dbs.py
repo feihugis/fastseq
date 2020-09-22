@@ -48,7 +48,8 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                   min_gen_length,
                   max_gen_length,
                   no_repeat_ngram_size,
-                  early_stopping):
+                  early_stopping,
+                  length_penalty):
         """Generate the summaries.
 
         Args:
@@ -83,7 +84,8 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                 min_length=min_gen_length,
                 max_length=max_gen_length,
                 no_repeat_ngram_size=no_repeat_ngram_size,
-                early_stopping=early_stopping)
+                early_stopping=early_stopping,
+                length_penalty=length_penalty)
             outputs = [self.tokenizer.decode(g) for g in summary_ids]
             self.batch_count += 1
         end = time.time()
@@ -93,13 +95,14 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
 
     @parameterized.named_parameters({
         'testcase_name': 'FP32',
-        'batch_size': 32,
+        'batch_size': 1,
         'max_token_length': 1024,
         'num_beams_cands': [4, 100],
         'min_gen_length': 55,
         'max_gen_length': 140,
         'no_repeat_ngram_size': 3,
         'early_stopping': True,
+        'length_penalty': 0.2,
     })
     def test_beam_search_optimizer(self,
                                    batch_size,
@@ -108,7 +111,8 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                                    min_gen_length,
                                    max_gen_length,
                                    no_repeat_ngram_size,
-                                   early_stopping):
+                                   early_stopping,
+                                   length_penalty):
         """Make sure the changes do not affect the model accuracy.
 
         Args:
@@ -132,7 +136,16 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
         outputs = {num_beams: [] for num_beams in num_beams_cands}
         timing = {num_beams: 0 for num_beams in num_beams_cands}
 
-        fout = open("debug_dbs_outputs_{}.log".format(time.time()), mode='w')
+        fout = open(
+            "debug_dbs_outputs_bs{}_nb{}_lp{}_maxgl{}_mingl{}_nrn{}_{}.log".format(
+                batch_size,
+                '+'.join(str(num_beams) for num_beams in num_beams_cands),
+                length_penalty,
+                max_gen_length,
+                min_gen_length,
+                no_repeat_ngram_size,
+                time.time()),
+            mode='w')
 
         with open(self.source_path, 'rt', encoding="utf-8") as source:
             for sline in source:
@@ -151,26 +164,29 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                         min_gen_length,
                         max_gen_length,
                         no_repeat_ngram_size,
-                        early_stopping))
+                        early_stopping,
+                        length_penalty=length_penalty))
                     end = time.time()
                     timing[num_beams] = timing[num_beams] + end - start
 
                 for i in range(len(inputs) - len(slines), len(inputs), 1):
-                    debug_str = ("\n-----------------------------------------\n"
-                    "\n--SOURCE \n \n {} \n"
-                    "\n--TARGET \n \n {} \n".format(inputs[i], self.targets[i]))
+                    debug_str = ("\n---------------------------------------\n\n"
+                    "--SOURCE\n\n{}\n\n"
+                    "--TARGET\n\n{}\n\n".format(inputs[i], self.targets[i]))
 
                     for num_beams in num_beams_cands:
-                        output = outputs[num_beams][i].replace('<pad>', '')
+                        output = outputs[num_beams][i].replace(
+                            '<pad>', '').replace('<s>', '').replace('</s>', '')
                         rouge = calculate_rouge([output], [self.targets[i]])
-                        debug_str += "\n--BEAM={} ROUGE={} \n \n G-{}-{} \n".format(
+                        debug_str += "--BEAM={} ROUGE={}\n\nH-{}-{}\n\n".format(
                             num_beams, rouge, num_beams, output)
 
                     fout.write(debug_str + '\n')
                     fout.flush()
-                    logger.debug(debug_str)
 
                 slines = []
+
+                break
 
             for num_beams in num_beams_cands:
                 logger.debug(

@@ -2,6 +2,8 @@
 # Licensed under the MIT License.
 
 """Optimization for beam search related parts in Transformers."""
+
+import logging
 import sys
 
 from typing import Dict, Iterable, Optional, Tuple
@@ -12,13 +14,14 @@ from torch.nn import functional as F
 
 from fastseq.logging.logging_utils import get_logger
 from fastseq.utils.api_decorator import replace
+from fastseq.utils.visualize_util import plot_tensor
 from transformers.configuration_auto import BartConfig
 from transformers.generation_utils import calc_banned_ngram_tokens, calc_banned_bad_words_ids, GenerationMixin, BeamHypotheses, top_k_top_p_filtering
 from transformers.modeling_auto import MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING
 from transformers.modeling_bart import BartForConditionalGeneration, SelfAttention, _reorder_buffer
 from transformers.modeling_t5 import T5ForConditionalGeneration
 
-logger = get_logger(__name__)
+logger = get_logger(__name__, logging.INFO)
 
 
 def adjust_num_beams(num_beams, ratio):
@@ -1556,6 +1559,10 @@ class GenerationMixinV2(GenerationMixin):
         # scores for each sentence in the beam
         beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float,
                                     device=input_ids.device)
+        beam_score_tracking = torch.zeros(
+            (batch_size*num_beams, 1),
+            dtype=torch.float,
+            device=input_ids.device)
 
         # for greedy decoding it is made sure that only tokens of the first beam
         # are considered to avoid sampling the exact same tokens three times
@@ -1833,6 +1840,16 @@ class GenerationMixinV2(GenerationMixin):
             # re-order batch and update current length
             input_ids = input_ids[beam_idx, :]
             input_ids = torch.cat([input_ids, beam_tokens.unsqueeze(1)], dim=-1)
+
+            beam_score_tracking = beam_score_tracking[beam_idx, :]
+            beam_score_tracking = torch.cat(
+                [beam_score_tracking, beam_scores.unsqueeze(1)], dim=-1)
+            logger.debug("accumulated beam score tracking: \n{} \n{} \n{}".format(
+                beam_idx, beam_scores, beam_score_tracking))
+            # plot_tensor(
+            #     beam_score_tracking,
+            #     "vis/beam_score_tracking_b{}_s{}.png".format(num_beams, cur_len))
+
             cur_len = cur_len + 1
 
             # re-order internal states
@@ -1845,6 +1862,14 @@ class GenerationMixinV2(GenerationMixin):
                     [attention_mask,
                 attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
                 )
+
+        beam_score_tracking[:, 1:] = beam_score_tracking[:, 1:] - beam_score_tracking[:, :-1]
+
+        logger.debug("beam score per step tracking: \n{}".format(
+                beam_score_tracking))
+        plot_tensor(
+            beam_score_tracking,
+            "vis/beam_score_tracking_b{}_per_step.png".format(num_beams, cur_len))
 
         # finalize all open beam hypotheses and add to generated hypotheses
         for batch_idx in range(batch_size):
