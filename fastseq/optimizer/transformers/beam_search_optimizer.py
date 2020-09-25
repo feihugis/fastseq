@@ -21,7 +21,7 @@ from transformers.modeling_auto import MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING
 from transformers.modeling_bart import BartForConditionalGeneration, SelfAttention, _reorder_buffer
 from transformers.modeling_t5 import T5ForConditionalGeneration
 
-logger = get_logger(__name__, logging.INFO)
+logger = get_logger(__name__, logging.DEBUG)
 
 
 def adjust_num_beams(num_beams, ratio):
@@ -1579,7 +1579,7 @@ class GenerationMixinV2(GenerationMixin):
         is_cuda_oom = False
 
         def adjust_beam_shape_(t, cur_num_beam, new_num_beam):
-            if t is None:
+            if not isinstance(t, torch.Tensor):
                 return t
             cur_shape = t.shape
             view_shape = (
@@ -1587,7 +1587,6 @@ class GenerationMixinV2(GenerationMixin):
                 ) + cur_shape[1:]
             return t.view(view_shape)[:, :new_num_beam,].reshape(
                 (-1,) + view_shape[2:]).detach().clone()
-
         while cur_len < max_length:
             logger.debug("Start gen: cur_len={}, num_beams={}, "
             "cuda_alloc_mem={}".format(
@@ -1619,6 +1618,7 @@ class GenerationMixinV2(GenerationMixin):
                 adj_num_beams = num_beams
                 input_ids_num_beams = num_beams
                 encoder_last_layer_output_num_beams = num_beams
+                encoder_mask_num_beams = num_beams
                 attention_mask_num_beams = num_beams
                 beam_scores_num_beams = num_beams
                 past_cache_num_beams = [
@@ -1649,6 +1649,11 @@ class GenerationMixinV2(GenerationMixin):
                                             decoder_cache[block_id]['self'][k],
                                             past_cache_num_beams[block_id][i],
                                             adj_num_beams)
+                                    if decoder_cache[
+                                        block_id]['self'][k] is not None:
+                                        decoder_cache[block_id]['self'][k] = \
+                                            decoder_cache[block_id]['self'][k][
+                                                :, :, :cur_len - 1, :]
                                     past_cache_num_beams[
                                         block_id][i] = adj_num_beams
 
@@ -1663,12 +1668,21 @@ class GenerationMixinV2(GenerationMixin):
                         # [batch_size*num_beams, max_seq_len, embed_dim] ->
                         # [batch_size*adjusted_num_beams, max_seq_len, embed_dim]
                         encoder_last_layer_output = adjust_beam_shape_(
-                            encoder_outputs[0],
+                            past[0][0],
                             encoder_last_layer_output_num_beams,
                             adj_num_beams)
                         encoder_last_layer_output_num_beams = adj_num_beams
+
+                        encoder_mask = adjust_beam_shape_(
+                            past[0][1],
+                            encoder_mask_num_beams,
+                            adj_num_beams)
+                        encoder_mask_num_beams = adj_num_beams
+
                         encoder_outputs = (
-                            encoder_last_layer_output,) + encoder_outputs[1:]
+                            encoder_last_layer_output,
+                            encoder_mask,
+                            past[0][2:]) + encoder_outputs[1:]
 
                         past = (encoder_outputs,) + past[1:]
                         del encoder_last_layer_output
@@ -1684,7 +1698,6 @@ class GenerationMixinV2(GenerationMixin):
                         beam_scores = adjust_beam_shape_(
                             beam_scores, beam_scores_num_beams, adj_num_beams)
                         beam_scores_num_beams = adj_num_beams
-
 
                         # logger.debug(torch.cuda.memory_summary(0))
                         # logger.debug(torch.cuda.memory_snapshot())
@@ -1844,7 +1857,10 @@ class GenerationMixinV2(GenerationMixin):
             beam_score_tracking = beam_score_tracking[beam_idx, :]
             beam_score_tracking = torch.cat(
                 [beam_score_tracking, beam_scores.unsqueeze(1)], dim=-1)
-            logger.debug("accumulated beam score tracking: \n{} \n{} \n{}".format(
+            logger.debug(
+                "\naccumulated beam score tracking: \n{}"
+                "\ncur beam score: \n{}"
+                "\nbeam score tracking: \n{}".format(
                 beam_idx, beam_scores, beam_score_tracking))
             # plot_tensor(
             #     beam_score_tracking,
@@ -1863,9 +1879,10 @@ class GenerationMixinV2(GenerationMixin):
                 attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
                 )
 
-        beam_score_tracking[:, 1:] = beam_score_tracking[:, 1:] - beam_score_tracking[:, :-1]
+        beam_score_tracking[
+            :, 1:] = beam_score_tracking[:, 1:] - beam_score_tracking[:, :-1]
 
-        logger.debug("beam score per step tracking: \n{}".format(
+        logger.debug("\nbeam score per step tracking: \n{}".format(
                 beam_score_tracking))
         plot_tensor(
             beam_score_tracking,
@@ -2140,7 +2157,11 @@ class BartForConditionalGenerationV2(BartForConditionalGeneration):
     """
     @staticmethod
     def _reorder_cache(past, beam_idx):
-        ((enc_out, enc_mask), decoder_past_key_values) = past
+        (encoder_outputs, decoder_past_key_values) = past
+        enc_out = encoder_outputs[0]
+        enc_mask = encoder_outputs[1]
+        if decoder_past_key_values is None:
+            return past
         reordered_past = []
         for layer_past in decoder_past_key_values:
             # Get the correct batch idx from decoder layer's batch dim for
@@ -2158,6 +2179,9 @@ class BartForConditionalGenerationV2(BartForConditionalGeneration):
 
             reordered_past.append(layer_past_new)
 
+        # There is no need to reorder enc_out because enc_out[0,] ...
+        # enc_out[num_beams-1,] are the same
+        # new_enc_out = enc_out if enc_out is None else enc_out.index_select(0, beam_idx)
         new_enc_mask = enc_mask if enc_mask is None else enc_mask.index_select(
             0, beam_idx)
 
