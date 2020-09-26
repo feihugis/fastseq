@@ -4,17 +4,19 @@
 """Optimization for beam search related parts in Transformers."""
 
 import logging
+from operator import index
+import time
 import sys
 
 from typing import Dict, Iterable, Optional, Tuple
 
 import torch
-from torch import Tensor
+from torch import Tensor, unsqueeze
 from torch.nn import functional as F
 
 from fastseq.logging.logging_utils import get_logger
 from fastseq.utils.api_decorator import replace
-from fastseq.utils.visualize_util import plot_tensor
+from fastseq.utils.visualize_util import plot_tensor, plot_hypo_beams
 from transformers.configuration_auto import BartConfig
 from transformers.generation_utils import calc_banned_ngram_tokens, calc_banned_bad_words_ids, GenerationMixin, BeamHypotheses, top_k_top_p_filtering
 from transformers.modeling_auto import MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING
@@ -38,6 +40,57 @@ def empty_cuda_cache(des=None):
     #     des = 'cuda.empty_cache():'
     # logger.debug('{} : {} -> {} = {} mb'.format(
     #     des, m0, m1, m0 - m1))
+
+@replace(BeamHypotheses)
+class BeamHypotheses(object):
+    def __init__(self, num_beams, max_length, length_penalty, early_stopping):
+        """
+        Initialize n-best list of hypotheses.
+        """
+        self.max_length = max_length - 1  # ignoring bos_token
+        self.length_penalty = length_penalty
+        self.early_stopping = early_stopping
+        self.num_beams = num_beams
+        self.beams = []
+        self.worst_score = 1e9
+
+    def __len__(self):
+        """
+        Number of hypotheses in the list.
+        """
+        return len(self.beams)
+
+    def add(self, hyp, sum_logprobs, logprobs_tracking=None):
+        """
+        Add a new hypothesis to the list.
+        """
+        score = sum_logprobs / len(hyp) ** self.length_penalty
+        # append the length_penalized score to the end of score tracking
+        logprobs_tracking = torch.cat(
+            [logprobs_tracking, torch.tensor([score])], dim=0)
+        if len(self) < self.num_beams or score > self.worst_score:
+            self.beams.append((score, hyp, logprobs_tracking))
+            if len(self) > self.num_beams:
+                sorted_scores = sorted([(s, idx) for idx, (s, _, _) in enumerate(self.beams)])
+                del self.beams[sorted_scores[0][1]]
+                self.worst_score = sorted_scores[1][0]
+            else:
+                self.worst_score = min(score, self.worst_score)
+
+    def is_done(self, best_sum_logprobs, cur_len):
+        """
+        If there are enough hypotheses and that none of the hypotheses being generated
+        can become better than the worst one in the heap, then we are done with this sentence.
+        """
+
+        if len(self) < self.num_beams:
+            return False
+        elif self.early_stopping:
+            return True
+        else:
+            cur_score = best_sum_logprobs / cur_len ** self.length_penalty
+            ret = self.worst_score >= cur_score
+            return ret
 
 @replace(calc_banned_ngram_tokens)
 def calc_banned_ngram_tokens_v2(prev_input_ids: Tensor,
@@ -1047,7 +1100,7 @@ class GenerationMixinV2(GenerationMixin):
 
         if num_beams > 1:
             if do_dynamic_beam_search:
-                output = self._generate_dynamic_beam_search(
+                output, beam_scores = self._generate_dynamic_beam_search(
                     input_ids,
                     max_length=max_length,
                     min_length=min_length,
@@ -1121,7 +1174,7 @@ class GenerationMixinV2(GenerationMixin):
                 model_specific_kwargs=model_specific_kwargs,
             )
 
-        return output
+        return output, beam_scores
 
     def postprocess_next_token_scores(
         self,
@@ -1486,6 +1539,7 @@ class GenerationMixinV2(GenerationMixin):
         effective_batch_size,
         decoder_start_token_id,
         model_specific_kwargs,
+        selected_num_beams=4,
     ):
         """Generate sequences for each example with beam search."""
 
@@ -1551,7 +1605,7 @@ class GenerationMixinV2(GenerationMixin):
 
         # generated hypotheses
         generated_hyps = [
-            BeamHypotheses(num_beams, max_length, length_penalty,
+            BeamHypotheses(selected_num_beams, max_length, length_penalty,
                             early_stopping=early_stopping)
             for _ in range(batch_size)
         ]
@@ -1560,7 +1614,7 @@ class GenerationMixinV2(GenerationMixin):
         beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float,
                                     device=input_ids.device)
         beam_score_tracking = torch.zeros(
-            (batch_size*num_beams, 1),
+            (batch_size, num_beams, 1),
             dtype=torch.float,
             device=input_ids.device)
 
@@ -1802,9 +1856,18 @@ class GenerationMixinV2(GenerationMixin):
             # next batch beam content
             next_tokens_id = next_tokens % vocab_size
             next_beams_id = next_tokens // vocab_size
+
+            next_beam_score_tracking = torch.gather(
+                beam_score_tracking,
+                1,
+                next_beams_id.unsqueeze(2).expand(-1, -1, cur_len))
+            next_beam_score_tracking = torch.cat(
+                [next_beam_score_tracking, next_scores.unsqueeze(2)], dim=-1)
+
             beams_offset = (torch.arange(0, batch_size) * num_beams)\
                 .unsqueeze(1).type_as(next_beams_id)
             effective_beam_id =  next_beams_id + beams_offset
+
             if eos_token_id is not None :
                 eos_mask = next_tokens_id.eq(eos_token_id)
             else :
@@ -1820,10 +1883,29 @@ class GenerationMixinV2(GenerationMixin):
             eos_effective_scores_cpu = eos_effective_scores.cpu()
             for i in range (0, eos_effective_idx_cpu.size()[-1]):
                 batch_idx = eos_effective_idx_cpu[i] // num_beams
-                if not done[batch_idx] :
+                if not done[batch_idx]:
+                    eos_beam_score_tracking = torch.cat(
+                        [
+                            beam_score_tracking[
+                                batch_idx,
+                                eos_effective_idx_cpu[i] % num_beams,
+                            ].cpu(),
+                            eos_effective_scores_cpu[i].unsqueeze(0)],
+                        dim=0).clone()
+                    num_match_beams = sum(
+                        [(eos_beam_score_tracking == next_beam_score_tracking[
+                            batch_idx][i].cpu()).all().item() for i in range(2*num_beams)
+                        ]
+                    )
+                    if num_match_beams != 1:
+                        logger.error("There are some issues in beam score "
+                        "tracking: {}".format(next_beam_score_tracking))
+
+                    assert num_match_beams == 1, "There are some issues in beam score tracking"
                     generated_hyps[batch_idx.item()].add(
                                 input_ids_cpu[eos_effective_idx_cpu[i]].clone(),
-                                eos_effective_scores_cpu[i],
+                                eos_effective_scores_cpu[i].item(),
+                                eos_beam_score_tracking,
                             )
                 done[batch_idx] = (done[batch_idx] or
                     generated_hyps[batch_idx].is_done(
@@ -1841,6 +1923,11 @@ class GenerationMixinV2(GenerationMixin):
                 effective_beam_id, dim=1, index=active_hypos)
             active_scores  = torch.gather(next_scores,
                 dim=1, index=active_hypos)
+            beam_score_tracking = torch.gather(
+                next_beam_score_tracking,
+                dim=1,
+                index=active_hypos.unsqueeze(2).expand(
+                    [batch_size, num_beams, cur_len + 1]))
             active_tokens  = torch.gather(next_tokens_id,
                 dim=1, index=active_hypos)
             beam_idx = active_effective_beam_id.view(-1)
@@ -1854,17 +1941,11 @@ class GenerationMixinV2(GenerationMixin):
             input_ids = input_ids[beam_idx, :]
             input_ids = torch.cat([input_ids, beam_tokens.unsqueeze(1)], dim=-1)
 
-            beam_score_tracking = beam_score_tracking[beam_idx, :]
-            beam_score_tracking = torch.cat(
-                [beam_score_tracking, beam_scores.unsqueeze(1)], dim=-1)
             logger.debug(
-                "\naccumulated beam score tracking: \n{}"
+                "\nselected beam index: \n{}"
                 "\ncur beam score: \n{}"
-                "\nbeam score tracking: \n{}".format(
+                "\naccumulated beam score tracking: \n{}".format(
                 beam_idx, beam_scores, beam_score_tracking))
-            # plot_tensor(
-            #     beam_score_tracking,
-            #     "vis/beam_score_tracking_b{}_s{}.png".format(num_beams, cur_len))
 
             cur_len = cur_len + 1
 
@@ -1879,14 +1960,13 @@ class GenerationMixinV2(GenerationMixin):
                 attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
                 )
 
-        beam_score_tracking[
-            :, 1:] = beam_score_tracking[:, 1:] - beam_score_tracking[:, :-1]
+        per_step_beam_score_tracking = beam_score_tracking[:, 1:] - beam_score_tracking[:, :-1]
 
         logger.debug("\nbeam score per step tracking: \n{}".format(
-                beam_score_tracking))
-        plot_tensor(
-            beam_score_tracking,
-            "vis/beam_score_tracking_b{}_per_step.png".format(num_beams, cur_len))
+                per_step_beam_score_tracking))
+        # plot_tensor(
+        #     per_step_beam_score_tracking,
+        #     "vis/beam_score_tracking_b{}_per_step.png".format(num_beams))
 
         # finalize all open beam hypotheses and add to generated hypotheses
         for batch_idx in range(batch_size):
@@ -1913,7 +1993,10 @@ class GenerationMixinV2(GenerationMixin):
                 effective_beam_id = batch_idx * num_beams + beam_id
                 final_score = beam_scores[effective_beam_id].item()
                 final_tokens = input_ids[effective_beam_id]
-                generated_hyps[batch_idx].add(final_tokens, final_score)
+                generated_hyps[batch_idx].add(
+                    final_tokens,
+                    final_score,
+                    beam_score_tracking[batch_idx, beam_id].cpu().clone())
 
         # depending on whether greedy generation is wanted or not define
         # different output_batch_size and output_num_return_sequences_per_batch
@@ -1925,16 +2008,36 @@ class GenerationMixinV2(GenerationMixin):
         # select the best hypotheses
         sent_lengths = input_ids.new(output_batch_size)
         best = []
+        best_beam_score_tracking = []
 
+        cur_time = time.time()
+        cur_time = 999
         # retrieve best hypotheses
         for i, hypotheses in enumerate(generated_hyps):
             sorted_hyps = sorted(hypotheses.beams, key=lambda x: x[0])
+            for b, beam in enumerate(sorted_hyps):
+                logger.debug(
+                    "\n-------Generated Hypothese_{}_Beam_{}\n"
+                    "\nscore: {}"
+                    "\ntokens({}):\n {}"
+                    "\nscore_tracking({}):\n {}"
+                    "\n-------".format(
+                        i, b, beam[0], beam[1].shape, beam[1], beam[2].shape, beam[2]))
+            img_path = "vis/hypo_{}_bs{}_nb{}_lp{}_beam_score_tracking_{}.png"\
+                .format(i, batch_size, num_beams, length_penalty, cur_time)
+            plot_hypo_beams(
+                sorted_hyps,
+                img_path,
+                "Hypo_{}_BeamSize_{}_LenPenalty_{}".format(
+                    i, num_beams, length_penalty))
+
             for j in range(output_num_return_sequences_per_batch):
                 effective_batch_idx = \
                 output_num_return_sequences_per_batch * i + j
-                best_hyp = sorted_hyps.pop()[1]
+                best_score, best_hyp, best_score_tracking = sorted_hyps.pop()
                 sent_lengths[effective_batch_idx] = len(best_hyp)
                 best.append(best_hyp)
+                best_beam_score_tracking.append(best_score_tracking)
 
         # shorter batches are padded
         if sent_lengths.min().item() != sent_lengths.max().item():
@@ -1955,7 +2058,7 @@ class GenerationMixinV2(GenerationMixin):
             decoded = torch.stack(best).type(torch.long)\
                     .to(next(self.parameters()).device)
 
-        return decoded
+        return decoded, best_beam_score_tracking
 
 @replace(SelfAttention)
 class SelfAttentionV2(SelfAttention):

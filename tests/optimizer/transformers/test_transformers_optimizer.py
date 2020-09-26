@@ -78,7 +78,7 @@ class TransformersBeamSearchOptimizerTest(TestCaseBase):
                                     return_tensors='pt')
 
             # Generate Summary
-            summary_ids = self.bart_model.generate(
+            summary_ids, *_ = self.bart_model.generate(
                 inputs['input_ids'].cuda(),
                 num_beams=num_beams,
                 min_length=min_gen_length,
@@ -96,7 +96,7 @@ class TransformersBeamSearchOptimizerTest(TestCaseBase):
         'testcase_name': 'FP32',
         'batch_size': 16,
         'max_token_length': 1024,
-        'num_beams': 100,
+        'num_beams': 4,
         'min_gen_length': 55,
         'max_gen_length': 199,
         'no_repeat_ngram_size': 3,
@@ -166,10 +166,7 @@ class TransformersBeamSearchOptimizerTest(TestCaseBase):
                         processed_sample_count / (end - start)))
 
             for i, output in enumerate(outputs):
-                if output != self.expected_outputs[i]:
-                    logger.debug("\n- {} \n+ {} \n".format(
-                        output,self.expected_outputs[i]))
-
+                self.assertEqual(output, self.expected_outputs[i])
 
 if __name__ == "__main__":
     absltest.main()
