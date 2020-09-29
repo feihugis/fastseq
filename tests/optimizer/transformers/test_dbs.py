@@ -99,16 +99,16 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
 
     @parameterized.named_parameters({
         'testcase_name': 'FP32',
-        'batch_size': 32,
+        'batch_size': 16,
         'max_token_length': 1024,
-        'num_beams_cands': [4, 100],
+        'num_beams_cands': [100],
         'min_gen_length': 55,
         'max_gen_length': 140,
         'no_repeat_ngram_size': 3,
         'early_stopping': False,
         'length_penalty': 0.1,
         'use_cache': True,
-        'is_tmp': True,
+        'is_tmp': False,
     })
     def test_beam_search_optimizer(self,
                                    batch_size,
@@ -235,6 +235,7 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
             beam_score_trackings=beam_score_trackings,
             rouges=rouges,
             img_path=beam_score_trackings_img)
+        logger.debug("Output img file: {}".format(beam_score_trackings_img))
         logger.debug("Output log file: {}".format(deboug_file_name))
 
 

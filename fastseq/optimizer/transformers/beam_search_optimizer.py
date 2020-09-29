@@ -1641,6 +1641,7 @@ class GenerationMixinV2(GenerationMixin):
                 ) + cur_shape[1:]
             return t.view(view_shape)[:, :new_num_beam,].reshape(
                 (-1,) + view_shape[2:]).detach().clone()
+
         while cur_len < max_length:
             logger.debug("Start gen: cur_len={}, num_beams={}, "
             "cuda_alloc_mem={}".format(
@@ -1667,7 +1668,6 @@ class GenerationMixinV2(GenerationMixin):
 
             if is_cuda_oom:
                 del model_inputs
-                empty_cuda_cache('Del model_inputs')
 
                 adj_num_beams = num_beams
                 input_ids_num_beams = num_beams
@@ -1689,6 +1689,42 @@ class GenerationMixinV2(GenerationMixin):
                         if adj_num_beams == 0:
                             logger.error("Could not find a good num_beams")
                             sys.exit(1)
+
+                        # update encoder_outputs:
+                        # [batch_size*num_beams, max_seq_len, embed_dim] ->
+                        # [batch_size*adjusted_num_beams, max_seq_len, embed_dim]
+                        torch.cuda.synchronize()
+                        encoder_last_layer_output = adjust_beam_shape_(
+                            past[0][0],
+                            encoder_last_layer_output_num_beams,
+                            1)
+                        encoder_outputs = (encoder_last_layer_output, ) + encoder_outputs[1:]
+                        past = ((encoder_last_layer_output, past[0][1:]),) + past[1:]
+                        encoder_last_layer_output_num_beams = 1
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        expanded_batch_idxs = (
+                            torch.arange(batch_size)
+                                  .view(-1, 1)
+                                  .repeat(1, adj_num_beams)
+                                  .view(-1)
+                                  .to(input_ids.device)
+                         )
+                        # expand encoder_outputs
+                        encoder_last_layer_output = encoder_last_layer_output.index_select(
+                            0, expanded_batch_idxs)
+                        encoder_last_layer_output_num_beams = adj_num_beams
+
+                        encoder_mask = adjust_beam_shape_(
+                            past[0][1],
+                            encoder_mask_num_beams,
+                            adj_num_beams)
+                        encoder_mask_num_beams = adj_num_beams
+
+                        encoder_outputs = (
+                            encoder_last_layer_output,
+                            encoder_mask,
+                            past[0][2:]) #+ encoder_outputs[1:]
 
                         # update cache in past
                         if past[1] is not None:
@@ -1718,28 +1754,9 @@ class GenerationMixinV2(GenerationMixin):
                             input_ids, input_ids_num_beams, adj_num_beams)
                         input_ids_num_beams = adj_num_beams
 
-                        # update encoder_outputs:
-                        # [batch_size*num_beams, max_seq_len, embed_dim] ->
-                        # [batch_size*adjusted_num_beams, max_seq_len, embed_dim]
-                        encoder_last_layer_output = adjust_beam_shape_(
-                            past[0][0],
-                            encoder_last_layer_output_num_beams,
-                            adj_num_beams)
-                        encoder_last_layer_output_num_beams = adj_num_beams
-
-                        encoder_mask = adjust_beam_shape_(
-                            past[0][1],
-                            encoder_mask_num_beams,
-                            adj_num_beams)
-                        encoder_mask_num_beams = adj_num_beams
-
-                        encoder_outputs = (
-                            encoder_last_layer_output,
-                            encoder_mask,
-                            past[0][2:]) + encoder_outputs[1:]
-
                         past = (encoder_outputs,) + past[1:]
                         del encoder_last_layer_output
+                        torch.cuda.empty_cache()
 
                         # update attention_mask
                         attention_mask = adjust_beam_shape_(
@@ -1891,7 +1908,7 @@ class GenerationMixinV2(GenerationMixin):
                                 eos_effective_idx_cpu[i] % num_beams,
                             ].cpu(),
                             eos_effective_scores_cpu[i].unsqueeze(0)],
-                        dim=0).clone()
+                        dim=0).cpu().clone()
                     num_match_beams = sum(
                         [(eos_beam_score_tracking == next_beam_score_tracking[
                             batch_idx][i].cpu()).all().item() for i in range(2*num_beams)
@@ -1941,11 +1958,11 @@ class GenerationMixinV2(GenerationMixin):
             input_ids = input_ids[beam_idx, :]
             input_ids = torch.cat([input_ids, beam_tokens.unsqueeze(1)], dim=-1)
 
-            logger.debug(
-                "\nselected beam index: \n{}"
-                "\ncur beam score: \n{}"
-                "\naccumulated beam score tracking: \n{}".format(
-                beam_idx, beam_scores, beam_score_tracking))
+            # logger.debug(
+            #     "\nselected beam index: \n{}"
+            #     "\ncur beam score: \n{}"
+            #     "\naccumulated beam score tracking: \n{}".format(
+            #     beam_idx, beam_scores, beam_score_tracking))
 
             cur_len = cur_len + 1
 
@@ -1960,10 +1977,10 @@ class GenerationMixinV2(GenerationMixin):
                 attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
                 )
 
-        per_step_beam_score_tracking = beam_score_tracking[:, 1:] - beam_score_tracking[:, :-1]
+        # per_step_beam_score_tracking = beam_score_tracking[:, 1:] - beam_score_tracking[:, :-1]
 
-        logger.debug("\nbeam score per step tracking: \n{}".format(
-                per_step_beam_score_tracking))
+        # logger.debug("\nbeam score per step tracking: \n{}".format(
+        #         per_step_beam_score_tracking))
         # plot_tensor(
         #     per_step_beam_score_tracking,
         #     "vis/beam_score_tracking_b{}_per_step.png".format(num_beams))
@@ -2011,25 +2028,25 @@ class GenerationMixinV2(GenerationMixin):
         best_beam_score_tracking = []
 
         cur_time = time.time()
-        cur_time = 999
+        # cur_time = 999
         # retrieve best hypotheses
         for i, hypotheses in enumerate(generated_hyps):
             sorted_hyps = sorted(hypotheses.beams, key=lambda x: x[0])
-            for b, beam in enumerate(sorted_hyps):
-                logger.debug(
-                    "\n-------Generated Hypothese_{}_Beam_{}\n"
-                    "\nscore: {}"
-                    "\ntokens({}):\n {}"
-                    "\nscore_tracking({}):\n {}"
-                    "\n-------".format(
-                        i, b, beam[0], beam[1].shape, beam[1], beam[2].shape, beam[2]))
-            img_path = "vis/hypo_{}_bs{}_nb{}_lp{}_beam_score_tracking_{}.png"\
-                .format(i, batch_size, num_beams, length_penalty, cur_time)
-            plot_hypo_beams(
-                sorted_hyps,
-                img_path,
-                "Hypo_{}_BeamSize_{}_LenPenalty_{}".format(
-                    i, num_beams, length_penalty))
+            # for b, beam in enumerate(sorted_hyps):
+            #     logger.debug(
+            #         "\n-------Generated Hypothese_{}_Beam_{}\n"
+            #         "\nscore: {}"
+            #         "\ntokens({}):\n {}"
+            #         "\nscore_tracking({}):\n {}"
+            #         "\n-------".format(
+            #             i, b, beam[0], beam[1].shape, beam[1], beam[2].shape, beam[2]))
+            # img_path = "vis/hypo_{}_bs{}_nb{}_lp{}_beam_score_tracking_{}.png"\
+            #     .format(i, batch_size, num_beams, length_penalty, cur_time)
+            # plot_hypo_beams(
+            #     sorted_hyps,
+            #     img_path,
+            #     "Hypo_{}_BeamSize_{}_LenPenalty_{}".format(
+            #         i, num_beams, length_penalty))
 
             for j in range(output_num_return_sequences_per_batch):
                 effective_batch_idx = \
