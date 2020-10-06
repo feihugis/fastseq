@@ -3,6 +3,7 @@
 
 """Apply the beam search optimizations to fairseq-v0.9.0"""
 
+import logging
 import math
 from typing import Optional
 
@@ -15,6 +16,9 @@ from fairseq.modules.multihead_attention import MultiheadAttention
 from fairseq.sequence_generator import SequenceGenerator
 
 from fastseq.utils.api_decorator import register_fairseq_optimized_class, replace
+from fastseq.logging import get_logger
+
+logger = get_logger(__name__, logging.DEBUG)
 
 @register_fairseq_optimized_class
 @replace(TransformerEncoder)
@@ -447,6 +451,9 @@ class SequenceGeneratorV2(SequenceGenerator):
         new_order = new_order.to(src_tokens.device).long()
         encoder_outs = model.reorder_encoder_out(encoder_outs, new_order)
 
+        logger.debug("Encoder input: \n{}".format(encoder_input))
+        logger.debug("Encoder output: \n{}".format(encoder_outs))
+
         # initialize buffers
         scores = src_tokens.new(bsz * beam_size, max_len + 1).float().fill_(0)
         scores_buf = scores.clone()
@@ -598,6 +605,9 @@ class SequenceGeneratorV2(SequenceGenerator):
                 encoder_outs,
                 temperature=self.temperature,
             )
+
+            logger.debug("input at {}th step: {}".format(step, tokens[:, :step + 1]))
+            logger.debug("score at {}th step: {}".format(step, lprobs))
 
             lprobs[:, self.pad] = -math.inf  # never select pad
             lprobs[:, self.unk] -= self.unk_penalty  # apply unk penalty
@@ -849,6 +859,11 @@ class SequenceGeneratorV2(SequenceGenerator):
             # swap buffers
             tokens, tokens_buf = tokens_buf, tokens
             scores, scores_buf = scores_buf, scores
+
+            logger.debug("beam_scores at {}th step: {}".format(step, scores[:, :step+1]))
+            logger.debug("beam_tokens at {}th step: {}".format(step, tokens[:, :step+1]))
+            logger.debug("generated tokens at {}th step: {}".format(step, tokens[:, :step+2]))
+
             if attn is not None:
                 attn, attn_buf = attn_buf, attn
 

@@ -1098,7 +1098,7 @@ class GenerationMixinV2(GenerationMixin):
             assert callable(self.get_encoder), "{} should be a method".format(
                 self.get_encoder)
 
-        if num_beams > 1:
+        if num_beams >= 1:
             if do_dynamic_beam_search:
                 output, beam_scores = self._generate_dynamic_beam_search(
                     input_ids,
@@ -1202,7 +1202,7 @@ class GenerationMixinV2(GenerationMixin):
             )
 
         # set eos token prob to zero if min_length is not reached
-        if eos_token_id is not None and cur_len < min_length:
+        if eos_token_id is not None and cur_len <= min_length:
             scores[:, eos_token_id] = -float("inf")
 
         def _update_scores(banned_tokens):
@@ -1539,7 +1539,6 @@ class GenerationMixinV2(GenerationMixin):
         effective_batch_size,
         decoder_start_token_id,
         model_specific_kwargs,
-        selected_num_beams=4,
     ):
         """Generate sequences for each example with beam search."""
 
@@ -1547,6 +1546,8 @@ class GenerationMixinV2(GenerationMixin):
         encoder = self.get_encoder()
         encoder_outputs: tuple = encoder(input_ids,
                                          attention_mask=attention_mask)
+        logger.debug("Encoder input: \n{}".format(input_ids))
+        logger.debug("Encoder output: \n{}".format(encoder_outputs))
 
         # Expand input ids if num_beams > 1 or num_return_sequences > 1
         if num_return_sequences > 1 or num_beams > 1:
@@ -1605,7 +1606,7 @@ class GenerationMixinV2(GenerationMixin):
 
         # generated hypotheses
         generated_hyps = [
-            BeamHypotheses(selected_num_beams, max_length, length_penalty,
+            BeamHypotheses(num_beams, max_length, length_penalty,
                             early_stopping=early_stopping)
             for _ in range(batch_size)
         ]
@@ -1641,8 +1642,8 @@ class GenerationMixinV2(GenerationMixin):
                 ) + cur_shape[1:]
             return t.view(view_shape)[:, :new_num_beam,].reshape(
                 (-1,) + view_shape[2:]).detach().clone()
-
-        while cur_len < max_length:
+        max_length += 1
+        while cur_len <= max_length:
             logger.debug("Start gen: cur_len={}, num_beams={}, "
             "cuda_alloc_mem={}".format(
                 cur_len, num_beams, get_cuda_alloc_mem()))
@@ -1795,15 +1796,20 @@ class GenerationMixinV2(GenerationMixin):
             # if model has past, then set the past variable to speed up decoding
             if self._use_cache(outputs, use_cache):
                 past = outputs[1]
+
+             # (batch_size * num_beams, vocab_size)
+            scores = F.log_softmax(next_token_logits, dim=-1)
+
+            logger.debug("input at {}th step: {}".format(cur_len, input_ids))
+            logger.debug("score at {}th step: {}".format(cur_len, scores))
+
             if self.config.is_encoder_decoder and do_sample is False:
                 # TODO (PVP) still a bit hacky here - there might be a better
                 # solution
-                next_token_logits = self.adjust_logits_during_generation(
-                    next_token_logits, cur_len=cur_len, max_length=max_length
+                scores = self.adjust_logits_during_generation(
+                    scores, cur_len=cur_len, max_length=max_length
                 )
 
-            # (batch_size * num_beams, vocab_size)
-            scores = F.log_softmax(next_token_logits, dim=-1)
             scores = self.postprocess_next_token_scores(
                 scores=scores,
                 input_ids=input_ids,
@@ -1865,8 +1871,22 @@ class GenerationMixinV2(GenerationMixin):
                     batch_size, num_beams * vocab_size
                 )  # (batch_size, num_beams * vocab_size)
 
-                next_scores, next_tokens = torch.topk(next_scores,
-                                2 * num_beams, dim=1, largest=True, sorted=True)
+                if cur_len == 1:
+                    # only sort the tokens in the first beam as all the beams
+                    # are the same for the first step
+                    next_scores, next_tokens = torch.topk(
+                        next_scores[:, :vocab_size],
+                        2 * num_beams,
+                        dim=1,
+                        largest=True,
+                        sorted=True)
+                else:
+                    next_scores, next_tokens = torch.topk(
+                        next_scores,
+                        2 * num_beams,
+                        dim=1,
+                        largest=True,
+                        sorted=True)
 
             assert next_scores.size() == next_tokens.size() \
                 == (batch_size, 2 * num_beams)
@@ -1886,7 +1906,7 @@ class GenerationMixinV2(GenerationMixin):
             effective_beam_id =  next_beams_id + beams_offset
 
             if eos_token_id is not None :
-                eos_mask = next_tokens_id.eq(eos_token_id)
+                eos_mask = next_tokens_id.eq(eos_token_id) & next_scores.ne(-float("inf"))
             else :
                 eos_mask = torch.zeros_like(next_tokens_id).bool()
             eos_effective_idx = torch.masked_select(
@@ -1918,7 +1938,7 @@ class GenerationMixinV2(GenerationMixin):
                         logger.error("There are some issues in beam score "
                         "tracking: {}".format(next_beam_score_tracking))
 
-                    assert num_match_beams == 1, "There are some issues in beam score tracking"
+                    # assert num_match_beams == 1, "There are some issues in beam score tracking"
                     generated_hyps[batch_idx.item()].add(
                                 input_ids_cpu[eos_effective_idx_cpu[i]].clone(),
                                 eos_effective_scores_cpu[i].item(),
@@ -1957,6 +1977,10 @@ class GenerationMixinV2(GenerationMixin):
             # re-order batch and update current length
             input_ids = input_ids[beam_idx, :]
             input_ids = torch.cat([input_ids, beam_tokens.unsqueeze(1)], dim=-1)
+
+            logger.debug("beam_scores at {}th step: {}".format(cur_len, beam_scores))
+            logger.debug("beam_tokens at {}th step: {}".format(cur_len, beam_tokens))
+            logger.debug("generated tokens at {}th step: {}".format(cur_len, input_ids))
 
             # logger.debug(
             #     "\nselected beam index: \n{}"
