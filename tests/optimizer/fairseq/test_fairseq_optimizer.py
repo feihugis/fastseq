@@ -45,7 +45,9 @@ class FairseqBeamSearchOptimizerTest(TestCaseBase):
             CACHED_BART_MODEL_PATHS['bart.large.cnn'],
             checkpoint_file='model.pt')
 
-        self.source_path = 'tests/optimizer/fairseq/data/cnndm_128.txt'
+        # self.source_path = 'tests/optimizer/fairseq/data/cnndm_128.txt'
+        self.source_path = 'data/fastseq_azure/tasks/cnn_dm/raw/test.source'
+        # self.source_path = 'diff_data_test.source'
 
         # read the expected output.
         self.expected_output_path = 'tests/optimizer/fairseq/data/expected_output.hypo'  # pylint: disable=line-too-long
@@ -58,7 +60,7 @@ class FairseqBeamSearchOptimizerTest(TestCaseBase):
     @parameterized.named_parameters({
         'testcase_name': 'Normal',
         'beam_size': 4,
-        'batch_size': 16,
+        'batch_size': 1,
         'need_attn': False,
         'lenpen': 2.0,
         'max_len_b': 140,
@@ -86,6 +88,8 @@ class FairseqBeamSearchOptimizerTest(TestCaseBase):
         self.bart.eval()
         count = 0
         outputs = []
+        test_fout = open('test_fairseq.log', mode='w')
+
         with open(self.source_path, 'rt', encoding="utf-8") as source:
             slines = []
             torch.cuda.synchronize()
@@ -105,6 +109,9 @@ class FairseqBeamSearchOptimizerTest(TestCaseBase):
                             output.strip() for output in hypotheses_batch
                         ]
                     outputs.extend(hypotheses_batch)
+                    for output in hypotheses_batch:
+                        test_fout.write(output + '\n')
+                        test_fout.flush()
                     slines = []
 
             torch.cuda.synchronize()
@@ -112,6 +119,7 @@ class FairseqBeamSearchOptimizerTest(TestCaseBase):
 
             self.assertEqual(len(outputs), len(self.expected_outputs))
 
+        test_fout.close()
         for i, output in enumerate(outputs):
             self.assertEqual(output, self.expected_outputs[i])
 

@@ -1546,8 +1546,8 @@ class GenerationMixinV2(GenerationMixin):
         encoder = self.get_encoder()
         encoder_outputs: tuple = encoder(input_ids,
                                          attention_mask=attention_mask)
-        logger.debug("Encoder input: \n{}".format(input_ids))
-        logger.debug("Encoder output: \n{}".format(encoder_outputs))
+        # logger.debug("Encoder input: \n{}".format(input_ids))
+        # logger.debug("Encoder output: \n{}".format(encoder_outputs))
 
         # Expand input ids if num_beams > 1 or num_return_sequences > 1
         if num_return_sequences > 1 or num_beams > 1:
@@ -1800,8 +1800,8 @@ class GenerationMixinV2(GenerationMixin):
              # (batch_size * num_beams, vocab_size)
             scores = F.log_softmax(next_token_logits, dim=-1)
 
-            logger.debug("input at {}th step: {}".format(cur_len, input_ids))
-            logger.debug("score at {}th step: {}".format(cur_len, scores))
+            # logger.debug("input at {}th step: {}".format(cur_len, input_ids))
+            # logger.debug("score at {}th step: {}".format(cur_len, scores))
 
             if self.config.is_encoder_decoder and do_sample is False:
                 # TODO (PVP) still a bit hacky here - there might be a better
@@ -1978,9 +1978,9 @@ class GenerationMixinV2(GenerationMixin):
             input_ids = input_ids[beam_idx, :]
             input_ids = torch.cat([input_ids, beam_tokens.unsqueeze(1)], dim=-1)
 
-            logger.debug("beam_scores at {}th step: {}".format(cur_len, beam_scores))
-            logger.debug("beam_tokens at {}th step: {}".format(cur_len, beam_tokens))
-            logger.debug("generated tokens at {}th step: {}".format(cur_len, input_ids))
+            # logger.debug("beam_scores at {}th step: {}".format(cur_len, beam_scores))
+            # logger.debug("beam_tokens at {}th step: {}".format(cur_len, beam_tokens))
+            # logger.debug("generated tokens at {}th step: {}".format(cur_len, input_ids))
 
             # logger.debug(
             #     "\nselected beam index: \n{}"
@@ -2076,6 +2076,7 @@ class GenerationMixinV2(GenerationMixin):
                 effective_batch_idx = \
                 output_num_return_sequences_per_batch * i + j
                 best_score, best_hyp, best_score_tracking = sorted_hyps.pop()
+                logger.debug("-------Generated Hypothese_{}_Best_{}: score={},best_hyp={}, score_tracking={}".format(i, j, best_score, best_hyp, best_score_tracking))
                 sent_lengths[effective_batch_idx] = len(best_hyp)
                 best.append(best_hyp)
                 best_beam_score_tracking.append(best_score_tracking)
