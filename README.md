@@ -1,3 +1,4 @@
+[![Board Status](https://dev.azure.com/adsbrain/6ea71208-70ea-440f-ba99-eeb3cbb3eaba/1c54abef-9221-4792-aafd-0174537f899c/_apis/work/boardbadge/b18a1c4e-33bd-4c91-b990-7dcbf13e0041)](https://dev.azure.com/adsbrain/6ea71208-70ea-440f-ba99-eeb3cbb3eaba/_boards/board/t/1c54abef-9221-4792-aafd-0174537f899c/Microsoft.EpicCategory)
 <h1 align="Center"> <p> FastSeq </p> </h1>
 
 # Introduction
