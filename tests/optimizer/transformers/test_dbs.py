@@ -115,12 +115,12 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
         'testcase_name': 'FP32',
         'batch_size': 16,
         'max_token_length': 1024,
-        'num_beams_cands': [100],
+        'num_beams_cands': [4],
         'min_gen_length': 55,
         'max_gen_length': 140,
         'no_repeat_ngram_size': 3,
-        'early_stopping': False,
-        'length_penalty': 2.1,
+        'early_stopping': True,
+        'length_penalty': 0.0001,
         'use_cache': True,
         'is_tmp': True,
     })
@@ -239,7 +239,7 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
 
                 slines = []
 
-                if is_tmp:
+                if is_tmp and len(outputs[num_beams_cands[0]]) >= 32:
                     break
 
             for num_beams in num_beams_cands:

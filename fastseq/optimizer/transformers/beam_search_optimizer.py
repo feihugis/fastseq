@@ -1691,42 +1691,6 @@ class GenerationMixinV2(GenerationMixin):
                             logger.error("Could not find a good num_beams")
                             sys.exit(1)
 
-                        # update encoder_outputs:
-                        # [batch_size*num_beams, max_seq_len, embed_dim] ->
-                        # [batch_size*adjusted_num_beams, max_seq_len, embed_dim]
-                        torch.cuda.synchronize()
-                        encoder_last_layer_output = adjust_beam_shape_(
-                            past[0][0],
-                            encoder_last_layer_output_num_beams,
-                            1)
-                        encoder_outputs = (encoder_last_layer_output, ) + encoder_outputs[1:]
-                        past = ((encoder_last_layer_output, past[0][1:]),) + past[1:]
-                        encoder_last_layer_output_num_beams = 1
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-                        expanded_batch_idxs = (
-                            torch.arange(batch_size)
-                                  .view(-1, 1)
-                                  .repeat(1, adj_num_beams)
-                                  .view(-1)
-                                  .to(input_ids.device)
-                         )
-                        # expand encoder_outputs
-                        encoder_last_layer_output = encoder_last_layer_output.index_select(
-                            0, expanded_batch_idxs)
-                        encoder_last_layer_output_num_beams = adj_num_beams
-
-                        encoder_mask = adjust_beam_shape_(
-                            past[0][1],
-                            encoder_mask_num_beams,
-                            adj_num_beams)
-                        encoder_mask_num_beams = adj_num_beams
-
-                        encoder_outputs = (
-                            encoder_last_layer_output,
-                            encoder_mask,
-                            past[0][2:]) #+ encoder_outputs[1:]
-
                         # update cache in past
                         if past[1] is not None:
                             decoder_cache = past[1]
@@ -1754,6 +1718,26 @@ class GenerationMixinV2(GenerationMixin):
                         input_ids = adjust_beam_shape_(
                             input_ids, input_ids_num_beams, adj_num_beams)
                         input_ids_num_beams = adj_num_beams
+
+                        # update encoder_outputs:
+                        # [batch_size*num_beams, max_seq_len, embed_dim] ->
+                        # [batch_size*adjusted_num_beams, max_seq_len, embed_dim]
+                        encoder_last_layer_output = adjust_beam_shape_(
+                            past[0][0],
+                            encoder_last_layer_output_num_beams,
+                            adj_num_beams)
+                        encoder_last_layer_output_num_beams = adj_num_beams
+
+                        encoder_mask = adjust_beam_shape_(
+                            past[0][1],
+                            encoder_mask_num_beams,
+                            adj_num_beams)
+                        encoder_mask_num_beams = adj_num_beams
+
+                        encoder_outputs = (
+                            encoder_last_layer_output,
+                            encoder_mask,
+                            past[0][2:]) + encoder_outputs[1:]
 
                         past = (encoder_outputs,) + past[1:]
                         del encoder_last_layer_output
@@ -2076,7 +2060,7 @@ class GenerationMixinV2(GenerationMixin):
                 effective_batch_idx = \
                 output_num_return_sequences_per_batch * i + j
                 best_score, best_hyp, best_score_tracking = sorted_hyps.pop()
-                logger.debug("-------Generated Hypothese_{}_Best_{}: score={},best_hyp={}, score_tracking={}".format(i, j, best_score, best_hyp, best_score_tracking))
+                logger.debug("-------Generated Hypothese_{}_Best_{}: score={}, \nbest_hyp={}, \nscore_tracking={}".format(i, j, best_score, best_hyp, best_score_tracking))
                 sent_lengths[effective_batch_idx] = len(best_hyp)
                 best.append(best_hyp)
                 best_beam_score_tracking.append(best_score_tracking)
