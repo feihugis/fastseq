@@ -64,6 +64,9 @@ class BeamHypotheses(object):
         """
         Add a new hypothesis to the list.
         """
+        # prob_per_step = logprobs_tracking[1:] - logprobs_tracking[:-1]
+        # var = torch.var(prob_per_step).item()
+        # sum_logprobs -= var * 5
         score = sum_logprobs / len(hyp) ** self.length_penalty
         # append the length_penalized score to the end of score tracking
         logprobs_tracking = torch.cat(
