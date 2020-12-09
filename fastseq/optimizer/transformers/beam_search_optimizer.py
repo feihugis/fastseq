@@ -1787,6 +1787,37 @@ class GenerationMixinV2(GenerationMixin):
              # (batch_size * num_beams, vocab_size)
             scores = F.log_softmax(next_token_logits, dim=-1)
 
+            if logger.level <= logging.DEBUG:
+                softmax_scores = F.softmax(next_token_logits, dim=-1)
+                sorted_scores, indices = softmax_scores.sort(dim=-1, descending=True)
+                sum_5 = sorted_scores[:, :5].sum(dim=-1)
+                sum_10 = sorted_scores[:, :10].sum(dim=-1)
+                sum_15 = sorted_scores[:, :15].sum(dim=-1)
+                sum_20 = sorted_scores[:, :20].sum(dim=-1)
+                logger.debug("Sum of top 5 softmax_scores:\n {}".format(sum_5))
+                logger.debug("Sum of top 10 softmax_scores:\n {}".format(sum_10))
+                logger.debug("Sum of top 15 softmax_scores:\n {}".format(sum_15))
+                logger.debug("Sum of top 20 softmax_scores:\n {}".format(sum_20))
+
+                r , c = sorted_scores.shape
+                prob_thread = 0.95
+                for beam in range(r):
+                    left = 0
+                    right = c
+                    mid = (left + right) // 2
+                    s = 0
+                    while left < right:
+                        mid = (left + right) // 2
+                        s = sorted_scores[beam, :mid + 1].sum()
+                        if s > prob_thread:
+                            right = mid - 1
+                        elif s < prob_thread:
+                            left = mid + 1
+                        else:
+                            break
+                    logger.debug("For beam {}-{}, the sum of {} top softmax_scores = {}".format(
+                        beam//num_beams, beam % num_beams, mid + 1, s))
+
             # logger.debug("input at {}th step: {}".format(cur_len, input_ids))
             # logger.debug("score at {}th step: {}".format(cur_len, scores))
 
