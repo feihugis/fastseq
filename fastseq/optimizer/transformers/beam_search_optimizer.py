@@ -1786,37 +1786,39 @@ class GenerationMixinV2(GenerationMixin):
 
              # (batch_size * num_beams, vocab_size)
             scores = F.log_softmax(next_token_logits, dim=-1)
+            # each value(x) means the top x token probabilities in the beam sums
+            # up to the predefined probability threashhodl (e.g., 0.95)
+            scores_threshhold_boundaries = []
 
-            if logger.level <= logging.DEBUG:
-                softmax_scores = F.softmax(next_token_logits, dim=-1)
-                sorted_scores, indices = softmax_scores.sort(dim=-1, descending=True)
-                sum_5 = sorted_scores[:, :5].sum(dim=-1)
-                sum_10 = sorted_scores[:, :10].sum(dim=-1)
-                sum_15 = sorted_scores[:, :15].sum(dim=-1)
-                sum_20 = sorted_scores[:, :20].sum(dim=-1)
-                logger.debug("Sum of top 5 softmax_scores:\n {}".format(sum_5))
-                logger.debug("Sum of top 10 softmax_scores:\n {}".format(sum_10))
-                logger.debug("Sum of top 15 softmax_scores:\n {}".format(sum_15))
-                logger.debug("Sum of top 20 softmax_scores:\n {}".format(sum_20))
-
-                r , c = sorted_scores.shape
-                prob_thread = 0.95
-                for beam in range(r):
-                    left = 0
-                    right = c
+            softmax_scores = F.softmax(next_token_logits, dim=-1)
+            sorted_scores, indices = softmax_scores.sort(dim=-1, descending=True)
+            r , c = sorted_scores.shape
+            prob_thread = 0.95
+            for beam in range(r):
+                left = 0
+                right = c
+                mid = (left + right) // 2
+                s = 0
+                while left < right:
                     mid = (left + right) // 2
-                    s = 0
-                    while left < right:
-                        mid = (left + right) // 2
-                        s = sorted_scores[beam, :mid + 1].sum()
-                        if s > prob_thread:
-                            right = mid - 1
-                        elif s < prob_thread:
-                            left = mid + 1
-                        else:
-                            break
-                    logger.debug("For beam {}-{}, the sum of {} top softmax_scores = {}".format(
-                        beam//num_beams, beam % num_beams, mid + 1, s))
+                    s = sorted_scores[beam, :mid + 1].sum()
+                    if s > prob_thread:
+                        right = mid - 1
+                    elif s < prob_thread:
+                        left = mid + 1
+                    else:
+                        break
+                scores_threshhold_boundaries.append(mid + 1)
+                logger.debug("For beam {}-{}, the sum of {} top softmax_scores = {}".format(
+                    beam//num_beams, beam % num_beams, mid + 1, s))
+            sum_5 = sorted_scores[:, :5].sum(dim=-1)
+            sum_10 = sorted_scores[:, :10].sum(dim=-1)
+            sum_15 = sorted_scores[:, :15].sum(dim=-1)
+            sum_20 = sorted_scores[:, :20].sum(dim=-1)
+            logger.debug("Sum of top 5 softmax_scores:\n {}".format(sum_5))
+            logger.debug("Sum of top 10 softmax_scores:\n {}".format(sum_10))
+            logger.debug("Sum of top 15 softmax_scores:\n {}".format(sum_15))
+            logger.debug("Sum of top 20 softmax_scores:\n {}".format(sum_20))
 
             # logger.debug("input at {}th step: {}".format(cur_len, input_ids))
             # logger.debug("score at {}th step: {}".format(cur_len, scores))
@@ -1905,6 +1907,35 @@ class GenerationMixinV2(GenerationMixin):
                         dim=1,
                         largest=True,
                         sorted=True)
+
+                # Check if the top 2*num_beams tokens fall into the
+                # predefined probability range. If not, replace it by the
+                # smallest one in the range.
+                for example_id in range(batch_size):
+                    beam_ids = (next_tokens[example_id, ] // vocab_size).cpu().numpy().tolist()
+                    beam_ids_count = {i: beam_ids.count(i) for i in beam_ids}
+                    for beam_id, count in beam_ids_count.items():
+                        count_threshhold = scores_threshhold_boundaries[num_beams * example_id + beam_id]
+                        if count_threshhold < count:
+                            selected_token_count = 0
+                            token = -1
+                            score = -1
+                            cur_token_id = 0
+                            while cur_token_id < 2 * num_beams:
+                                if next_tokens[example_id, cur_token_id] // vocab_size == beam_id:
+                                    token = next_tokens[example_id, cur_token_id]
+                                    score = next_scores[example_id, cur_token_id]
+                                    selected_token_count += 1
+                                    if selected_token_count >= count_threshhold:
+                                        cur_token_id += 1
+                                        break
+                                cur_token_id += 1
+                            while cur_token_id < 2 * num_beams:
+                                if next_tokens[example_id, cur_token_id] // vocab_size == beam_id:
+                                    logger.debug("The token probability is too small. Update it from {} to {}".format(next_scores[example_id, cur_token_id], score))
+                                    next_tokens[example_id, cur_token_id] = token
+                                    next_scores[example_id, cur_token_id] = score
+                                cur_token_id += 1
 
             assert next_scores.size() == next_tokens.size() \
                 == (batch_size, 2 * num_beams)
