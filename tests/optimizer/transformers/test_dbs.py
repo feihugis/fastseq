@@ -44,10 +44,11 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
             'facebook/bart-large-cnn')
 
         self.source_path = 'data/fastseq_azure/tasks/cnn_dm/raw/test.source'
-        # self.source_path = 'tests/optimizer/fairseq/data/cnndm_128.txt'
-        # self.source_path = 'diff_data_test.source'
-
         self.target_path = 'data/fastseq_azure/tasks/cnn_dm/raw/test.target'
+        # self.source_path = 'tests/optimizer/fairseq/data/cnndm_128.txt'
+        # self.source_path = 'tests/optimizer/transformers/debug.source'
+        # self.target_path = 'tests/optimizer/transformers/debug.target'
+
         self.targets = []
         with open(self.target_path, 'rt', encoding="utf-8") as target_file:
             for line in target_file:
@@ -63,7 +64,8 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                   no_repeat_ngram_size,
                   early_stopping,
                   length_penalty,
-                  use_cache):
+                  use_cache,
+                  beam_token_prob_thresh,):
         """Generate the summaries.
 
         Args:
@@ -102,7 +104,8 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                 no_repeat_ngram_size=no_repeat_ngram_size,
                 early_stopping=early_stopping,
                 length_penalty=length_penalty,
-                use_cache=use_cache,)
+                use_cache=use_cache,
+                beam_token_prob_thresh=beam_token_prob_thresh,)
             # outputs = [self.tokenizer.decode(g) for g in summary_ids]
             outputs = [self.bart.decode(g[g != 1]) for g in summary_ids]
             self.batch_count += 1
@@ -115,14 +118,15 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
         'testcase_name': 'FP32',
         'batch_size': 16,
         'max_token_length': 1024,
-        'num_beams_cands': [4],
+        'num_beams_cands': [8],
         'min_gen_length': 55,
         'max_gen_length': 140,
         'no_repeat_ngram_size': 3,
         'early_stopping': True,
-        'length_penalty': 0.0001,
+        'length_penalty': 0.1,
         'use_cache': True,
-        'is_tmp': True,
+        'is_tmp': False,
+        'beam_token_prob_thresh': 0.95,
     })
     def test_beam_search_optimizer(self,
                                    batch_size,
@@ -134,7 +138,8 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                                    early_stopping,
                                    length_penalty,
                                    use_cache,
-                                   is_tmp):
+                                   is_tmp,
+                                   beam_token_prob_thresh):
         """Make sure the changes do not affect the model accuracy.
 
         Args:
@@ -149,6 +154,9 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
             no_repeat_ngram_size (int, optional): size of no repeat gram.
             early_stopping (bool, optional): indicate if the beam search will be
                                              early stopped.
+            beam_token_prob_thresh (float, optional): threshhold used to define
+                                                      the valid range for token
+                                                      probability.
         """
         self.bart_model.cuda()
         self.bart_model.eval()
@@ -162,7 +170,7 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
 
         cur_time = time.time() if not is_tmp else 999
 
-        base_filename = "{}dbs_bs{}_nb{}_lp{}_maxgl{}_mingl{}_nrn{}_uc{}_es{}".format(
+        base_filename = "{}dbs_bs{}_nb{}_lp{}_maxgl{}_mingl{}_nrn{}_uc{}_es{}_btpt{}".format(
             "tmp/" if is_tmp else "",
             batch_size,
             '+'.join(str(num_beams) for num_beams in num_beams_cands),
@@ -172,6 +180,7 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
             no_repeat_ngram_size,
             use_cache,
             early_stopping,
+            beam_token_prob_thresh,
         )
         output_file_name = "debug/{}_OUTPUTS_{}.log".format(
             base_filename, cur_time)
@@ -212,7 +221,8 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                         no_repeat_ngram_size,
                         early_stopping,
                         length_penalty=length_penalty,
-                        use_cache=use_cache)
+                        use_cache=use_cache,
+                        beam_token_prob_thresh=beam_token_prob_thresh)
                     outputs[num_beams].extend([line.strip() for line in output])
                     beam_score_trackings[num_beams].extend(beam_score_tracking)
                     end = time.time()

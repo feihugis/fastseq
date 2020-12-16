@@ -727,6 +727,7 @@ class GenerationMixinV2(GenerationMixin):
                  attention_mask: Optional[torch.LongTensor] = None,
                  decoder_start_token_id: Optional[int] = None,
                  use_cache: Optional[bool] = None,
+                 beam_token_prob_thresh: Optional[float] = 1.0,
                  do_dynamic_beam_search: Optional[bool] = True,
                  **model_specific_kwargs) -> torch.LongTensor:
         r""" Generates sequences for models with a LM head. The method currently
@@ -833,6 +834,10 @@ class GenerationMixinV2(GenerationMixin):
             model_specific_kwargs: (`optional`) dict
                 Additional model specific kwargs will be forwarded to the
                 `forward` function of the model.
+
+            beam_token_prob_thresh (float, optional): threshhold used to define
+                                                      the valid range for token
+                                                      probability.
 
         Return:
 
@@ -1127,6 +1132,7 @@ class GenerationMixinV2(GenerationMixin):
                     effective_batch_mult=effective_batch_mult,
                     effective_batch_size=effective_batch_size,
                     decoder_start_token_id=decoder_start_token_id,
+                    beam_token_prob_thresh=beam_token_prob_thresh,
                     model_specific_kwargs=model_specific_kwargs,
                 )
             else:
@@ -1541,6 +1547,7 @@ class GenerationMixinV2(GenerationMixin):
         effective_batch_mult,
         effective_batch_size,
         decoder_start_token_id,
+        beam_token_prob_thresh,
         model_specific_kwargs,
     ):
         """Generate sequences for each example with beam search."""
@@ -1610,13 +1617,13 @@ class GenerationMixinV2(GenerationMixin):
         # generated hypotheses
         generated_hyps = [
             BeamHypotheses(num_beams, max_length, length_penalty,
-                            early_stopping=early_stopping)
+                           early_stopping=early_stopping)
             for _ in range(batch_size)
         ]
 
         # scores for each sentence in the beam
-        beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float,
-                                    device=input_ids.device)
+        beam_scores = torch.zeros(
+            (batch_size, num_beams), dtype=torch.float, device=input_ids.device)
         beam_score_tracking = torch.zeros(
             (batch_size, num_beams, 1),
             dtype=torch.float,
@@ -1641,11 +1648,11 @@ class GenerationMixinV2(GenerationMixin):
                 return t
             cur_shape = t.shape
             view_shape = (
-                cur_shape[0]//cur_num_beam, cur_num_beam,
-                ) + cur_shape[1:]
+                cur_shape[0]//cur_num_beam, cur_num_beam,) + cur_shape[1:]
             return t.view(view_shape)[:, :new_num_beam,].reshape(
                 (-1,) + view_shape[2:]).detach().clone()
         max_length += 1
+
         while cur_len <= max_length:
             logger.debug("Start gen: cur_len={}, num_beams={}, "
             "cuda_alloc_mem={}".format(
@@ -1793,7 +1800,7 @@ class GenerationMixinV2(GenerationMixin):
             softmax_scores = F.softmax(next_token_logits, dim=-1)
             sorted_scores, indices = softmax_scores.sort(dim=-1, descending=True)
             r , c = sorted_scores.shape
-            prob_thread = 0.95
+            prob_thread = beam_token_prob_thresh
             for beam in range(r):
                 left = 0
                 right = c
@@ -1811,17 +1818,17 @@ class GenerationMixinV2(GenerationMixin):
                 scores_threshhold_boundaries.append(mid + 1)
                 logger.debug("For beam {}-{}, the sum of {} top softmax_scores = {}".format(
                     beam//num_beams, beam % num_beams, mid + 1, s))
-            sum_5 = sorted_scores[:, :5].sum(dim=-1)
-            sum_10 = sorted_scores[:, :10].sum(dim=-1)
-            sum_15 = sorted_scores[:, :15].sum(dim=-1)
-            sum_20 = sorted_scores[:, :20].sum(dim=-1)
-            logger.debug("Sum of top 5 softmax_scores:\n {}".format(sum_5))
-            logger.debug("Sum of top 10 softmax_scores:\n {}".format(sum_10))
-            logger.debug("Sum of top 15 softmax_scores:\n {}".format(sum_15))
-            logger.debug("Sum of top 20 softmax_scores:\n {}".format(sum_20))
+            # sum_5 = sorted_scores[:, :5].sum(dim=-1)
+            # sum_10 = sorted_scores[:, :10].sum(dim=-1)
+            # sum_15 = sorted_scores[:, :15].sum(dim=-1)
+            # sum_20 = sorted_scores[:, :20].sum(dim=-1)
+            # logger.debug("Sum of top 5 softmax_scores:\n {}".format(sum_5))
+            # logger.debug("Sum of top 10 softmax_scores:\n {}".format(sum_10))
+            # logger.debug("Sum of top 15 softmax_scores:\n {}".format(sum_15))
+            # logger.debug("Sum of top 20 softmax_scores:\n {}".format(sum_20))
 
-            # logger.debug("input at {}th step: {}".format(cur_len, input_ids))
-            # logger.debug("score at {}th step: {}".format(cur_len, scores))
+            logger.debug("input at {}th step: \n{}".format(cur_len, input_ids))
+            logger.debug("softmax_scores at {}th step: \n{}".format(cur_len, softmax_scores))
 
             if self.config.is_encoder_decoder and do_sample is False:
                 # TODO (PVP) still a bit hacky here - there might be a better
@@ -1918,23 +1925,28 @@ class GenerationMixinV2(GenerationMixin):
                         count_threshhold = scores_threshhold_boundaries[num_beams * example_id + beam_id]
                         if count_threshhold < count:
                             selected_token_count = 0
-                            token = -1
-                            score = -1
+                            # token = -1
+                            # score = -1
                             cur_token_id = 0
                             while cur_token_id < 2 * num_beams:
                                 if next_tokens[example_id, cur_token_id] // vocab_size == beam_id:
-                                    token = next_tokens[example_id, cur_token_id]
-                                    score = next_scores[example_id, cur_token_id]
+                                    # token = next_tokens[example_id, cur_token_id]
+                                    # score = next_scores[example_id, cur_token_id]
                                     selected_token_count += 1
                                     if selected_token_count >= count_threshhold:
                                         cur_token_id += 1
                                         break
                                 cur_token_id += 1
+                            # token = -10000
+                            # score = -10000000
                             while cur_token_id < 2 * num_beams:
                                 if next_tokens[example_id, cur_token_id] // vocab_size == beam_id:
-                                    logger.debug("The token probability is too small. Update it from {} to {}".format(next_scores[example_id, cur_token_id], score))
-                                    next_tokens[example_id, cur_token_id] = token
-                                    next_scores[example_id, cur_token_id] = score
+                                    logger.debug("The token ({}, {}, {}) probability is too small (beyond top {}). Update it from {} to -inf".format(example_id, beam_id, cur_token_id, selected_token_count, next_scores[example_id, cur_token_id]))
+                                    # Change the tokens out of probability range
+                                    # to be eos and '-inf', so that it will not
+                                    # be selected in the next step.
+                                    next_tokens[example_id, cur_token_id] = eos_token_id
+                                    next_scores[example_id, cur_token_id] = -float("inf")
                                 cur_token_id += 1
 
             assert next_scores.size() == next_tokens.size() \
@@ -1998,6 +2010,10 @@ class GenerationMixinV2(GenerationMixin):
                         next_scores[batch_idx].max().item(), cur_len))
             cand_offsets = (torch.arange(0, 2 * num_beams).type_as(
                 input_ids).cuda())
+            # As the selected tokens outside of the probability range will be
+            # updated to 'EOS' and '-inf', so eos_mask is updated again here.
+            if eos_token_id is not None :
+                eos_mask = next_tokens_id.eq(eos_token_id)
             active_mask = torch.add(
                 eos_mask.type_as(cand_offsets) * (2*num_beams),
                 cand_offsets[: eos_mask.size(1)],
@@ -2031,11 +2047,11 @@ class GenerationMixinV2(GenerationMixin):
             # logger.debug("beam_tokens at {}th step: {}".format(cur_len, beam_tokens))
             # logger.debug("generated tokens at {}th step: {}".format(cur_len, input_ids))
 
-            # logger.debug(
-            #     "\nselected beam index: \n{}"
-            #     "\ncur beam score: \n{}"
-            #     "\naccumulated beam score tracking: \n{}".format(
-            #     beam_idx, beam_scores, beam_score_tracking))
+            logger.debug(
+                "\nselected beam index: \n{}"
+                "\ncur beam score: \n{}"
+                "\naccumulated beam score tracking: \n{}".format(
+                beam_idx, beam_scores, beam_score_tracking))
 
             cur_len = cur_len + 1
 
@@ -2140,7 +2156,10 @@ class GenerationMixinV2(GenerationMixin):
 
             # fill with hypothesis and eos_token_id if necessary
             for i, hypo in enumerate(best):
-                decoded[i, : sent_lengths[i]] = hypo
+                # TODO: make `decoded[i, : sent_lengths[i]] = hypo` work again.
+                decoded[i, : sent_lengths[i]] = hypo[:sent_max_len]
+                if sent_lengths[i] > sent_max_len:
+                    logger.error("The lenght of generated hypo {} is not exepected: {}.".format(sent_lengths[i], hypo))
                 if sent_lengths[i] < max_length:
                     decoded[i, sent_lengths[i]] = eos_token_id
         else:
