@@ -23,7 +23,7 @@ from transformers.modeling_auto import MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING
 from transformers.modeling_bart import BartForConditionalGeneration, SelfAttention, _reorder_buffer
 from transformers.modeling_t5 import T5ForConditionalGeneration
 
-logger = get_logger(__name__, logging.DEBUG)
+logger = get_logger(__name__, logging.INFO)
 
 
 def adjust_num_beams(num_beams, ratio):
@@ -1815,7 +1815,7 @@ class GenerationMixinV2(GenerationMixin):
                         left = mid + 1
                     else:
                         break
-                scores_threshhold_boundaries.append(mid + 1)
+                scores_threshhold_boundaries.append(max(mid + 1, 2))
                 logger.debug("For beam {}-{}, the sum of {} top softmax_scores = {}".format(
                     beam//num_beams, beam % num_beams, mid + 1, s))
             # sum_5 = sorted_scores[:, :5].sum(dim=-1)
