@@ -8,12 +8,15 @@ model accuracy.
 
 import os
 
+from fastseq.ops.softmax import softmax_v2
+
 import torch
 from absl.testing import absltest, parameterized
 from fairseq.models.bart.model import BARTModel
 
 import fastseq
 from fastseq.logging import get_logger
+
 from fastseq.utils.file_utils import decompress_file, make_dirs, wget
 from fastseq.utils.test_utils import (BART_MODEL_URLS, CACHED_BART_MODEL_DIR,
                                       CACHED_BART_MODEL_PATHS,
@@ -59,7 +62,7 @@ class FairseqBeamSearchOptimizerTest(TestCaseBase):
     @parameterized.named_parameters({
         'testcase_name': 'Normal',
         'beam_size': 4,
-        'batch_size': 16,
+        'batch_size': 128,
         'need_attn': False,
         'lenpen': 2.0,
         'max_len_b': 140,
@@ -85,6 +88,7 @@ class FairseqBeamSearchOptimizerTest(TestCaseBase):
                                               need_attn=need_attn)
         self.bart.cuda()
         self.bart.eval()
+        self.bart.half()
         count = 0
         outputs = []
         with open(self.source_path, 'rt', encoding="utf-8") as source:
