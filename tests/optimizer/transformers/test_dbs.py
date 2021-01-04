@@ -118,15 +118,15 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
         'testcase_name': 'FP32',
         'batch_size': 16,
         'max_token_length': 1024,
-        'num_beams_cands': [20],
+        'num_beams_cands': [10],
         'min_gen_length': 55,
         'max_gen_length': 140,
         'no_repeat_ngram_size': 3,
         'early_stopping': True,
-        'length_penalty': 2,
+        'length_penalty': 2.0,
         'use_cache': True,
         'is_tmp': False,
-        'beam_token_prob_thresh': 0.4,
+        'beam_token_prob_thresh': 1.0,
     })
     def test_beam_search_optimizer(self,
                                    batch_size,
@@ -233,6 +233,9 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                     "--SOURCE\n\n{}\n\n"
                     "--TARGET\n\n{}\n\n".format(inputs[i], self.targets[i]))
 
+                    best_score = -float("inf")
+                    best_hypo = ""
+                    best_num_beam = 0
                     for num_beams in num_beams_cands:
                         output = outputs[num_beams][i].replace(
                             '<pad>', '').replace('<s>', '').replace('</s>', '')
@@ -240,8 +243,15 @@ class TransformersDynamicBeamSearchTest(TestCaseBase):
                         test_fout.flush()
                         rouge = calculate_rouge([output], [self.targets[i]])
                         rouges[num_beams].append(rouge)
-                        debug_str += "--BEAM={} ROUGE={}\n\nH-{}-{}\n\n".format(
-                            num_beams, rouge, num_beams, output)
+                        score = beam_score_trackings[num_beams][i][-1].item()
+                        debug_str += "--BEAM={} SCORE={} ROUGE={}\n\nH-{}-{}\n\n".format(
+                            num_beams, score, rouge, num_beams, output)
+                        if best_score < beam_score_trackings[num_beams][i][-1].item():
+                            best_score = beam_score_trackings[num_beams][i][-1].item()
+                            best_hypo = output
+                            best_num_beam = num_beams
+                    debug_str += "--BEST_NUM_BEAM={} BEST_SCORE={} \nBEST_HYPO-{}\n\n".format(
+                        best_num_beam, best_score, best_hypo)
 
                     logger.debug(debug_str)
                     fout.write(debug_str + '\n')
